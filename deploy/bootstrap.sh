@@ -32,9 +32,15 @@ for i in $(seq 1 60); do
   sleep 2
 done
 
-if [ "$(psql "$DATABASE_URL" -Atqc "select to_regclass('public.events') is not null")" = "t" ]; then
+# bootstrap_ok se crea solo cuando pg_restore terminó bien. Si hay tablas pero no esa marca, la
+# restauración anterior quedó a medias (p. ej. disco lleno): se borra y se empieza de cero.
+if [ "$(psql "$DATABASE_URL" -Atqc "select to_regclass('public.bootstrap_ok') is not null")" = "t" ]; then
   log "La base ya tiene datos: no se descarga nada."
 else
+  if [ "$(psql "$DATABASE_URL" -Atqc "select count(*) from pg_tables where schemaname = 'public'")" != "0" ]; then
+    log "Restauración anterior incompleta: se borran las tablas y se restaura de nuevo."
+    psql "$DATABASE_URL" -qc "drop schema public cascade; create schema public;"
+  fi
   if [ ! -s "$DUMP_PATH" ] || ! echo "$DUMP_SHA256  $DUMP_PATH" | sha256sum -c --status; then
     log "Descargando fires.dump (132 MB)…"
     curl -fL --retry 3 -o "$DUMP_PATH" "$DUMP_URL"
@@ -44,7 +50,8 @@ else
     exit 1
   fi
   log "Restaurando la base (unos 2 minutos)…"
-  pg_restore --no-owner --no-privileges -d "$DATABASE_URL" "$DUMP_PATH"
+  pg_restore --no-owner --no-privileges --exit-on-error -d "$DATABASE_URL" "$DUMP_PATH"
+  psql "$DATABASE_URL" -qc "create table bootstrap_ok as select now() as restored_at"
   log "Base lista: $(psql "$DATABASE_URL" -Atqc "select count(*) from events") eventos."
   [ "${KEEP_DUMP:-0}" = "1" ] || rm -f "$DUMP_PATH"
 fi
