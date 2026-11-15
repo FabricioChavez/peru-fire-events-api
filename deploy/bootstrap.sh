@@ -20,6 +20,11 @@ PORT="${PORT:-8000}"
 
 log() { echo "[bootstrap] $*"; }
 
+if [ -n "${RAILWAY_ENVIRONMENT:-}" ] && [ "$DATABASE_URL" = "postgresql:///fires" ]; then
+  log "Falta la variable DATABASE_URL: en Railway ponla como \${{Postgres.DATABASE_URL}}."
+  exit 1
+fi
+
 log "Esperando a Postgres…"
 for i in $(seq 1 60); do
   if psql "$DATABASE_URL" -Atqc "select 1" >/dev/null 2>&1; then break; fi

@@ -12,12 +12,17 @@ restaura en `DATABASE_URL` si la base está vacía y lanza la API.
 
 ## Deploy en Railway
 
-1. **New Project → Deploy from GitHub repo** → este repo. Railway detecta el `Dockerfile`.
-2. En el mismo proyecto: **New → Database → PostgreSQL**.
-3. En el servicio de la API, **Variables**: `DATABASE_URL` = `${{Postgres.DATABASE_URL}}`.
-4. **Settings → Networking → Generate Domain**.
-5. En **Deploy Logs** espera `Uvicorn running` (~3–5 min la primera vez). La API necesita
-   ~1 GB de RAM.
+`railway.json` ya fija el build con el `Dockerfile` y el reinicio si falla.
+
+1. **New Project → Deploy from GitHub repo** → este repo.
+2. En el mismo proyecto: **Create → Database → PostgreSQL**.
+3. En el servicio de la API, **Variables → New Variable**: nombre `DATABASE_URL`, valor
+   `${{Postgres.DATABASE_URL}}`. Railway vuelve a desplegar solo.
+4. **Settings → Networking → Generate Domain** (puerto: el que Railway sugiere).
+5. En **Deploy Logs** espera `Uvicorn running` (~3–5 min la primera vez: baja y restaura la
+   base). Los siguientes deploys ya no bajan nada.
+
+La API usa ~1 GB de RAM y la base ~1 GB de disco.
 
 ## Correr en local
 
