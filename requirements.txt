@@ -5,5 +5,5 @@ psycopg-pool>=3.2
 numpy>=1.26
 pandas>=2.2
 scipy>=1.12
-# Opcional: índice en GPU (NVIDIA, CUDA 12). Sin esto se usa el KD-tree en CPU.
+# Optional: GPU index (NVIDIA, CUDA 12). Without it the CPU KD-tree is used.
 # cupy-cuda12x>=13

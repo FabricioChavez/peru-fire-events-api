@@ -1,16 +1,16 @@
-"""Índice espacio-tiempo en memoria, construido a partir de las detecciones en Postgres.
+"""In-memory space-time index, built from the detections stored in Postgres.
 
-Cada detección es un punto (x_km, y_km, t·s) con x, y en la proyección LAEA de Perú y t en
-días; s (km por día) iguala las unidades de tiempo y espacio. Sobre esos puntos:
+Each detection is a point (x_km, y_km, t·s), with x, y in Peru's LAEA projection and t in days;
+s (km per day) puts time and space in the same units. On those points:
 
-- backend "kdtree": scipy cKDTree (CPU). Construcción O(n log n), consultas O(log n + k).
-- backend "cuda":   CuPy en la GPU. Guarda las columnas en la tarjeta y filtra por fuerza bruta
-                    en paralelo; útil para regiones grandes (miles de resultados).
+- backend "kdtree": scipy cKDTree (CPU). Build O(n log n), queries O(log n + k).
+- backend "cuda":   CuPy on the GPU. Keeps the columns on the card and filters by brute force
+                    in parallel; useful for large regions (thousands of results).
 
-Consultas (todas devuelven event_id con el número de detecciones que cayeron en la consulta):
+Queries (all return event_id with the number of detections that fell inside the query):
 - box(lon_min, lat_min, lon_max, lat_max, t0, t1)
 - near(lat, lon, radius_km, t0, t1)
-- nearest(lat, lon, t, k)  vecinos más cercanos en espacio-tiempo
+- nearest(lat, lon, t, k)  nearest neighbours in space-time
 """
 import io
 import os
@@ -25,14 +25,14 @@ EPOCH = pd.Timestamp("2012-01-01", tz="UTC")
 
 
 def to_days(t):
-    """Días (float) desde EPOCH; las fechas sin zona se toman como UTC."""
+    """Days (float) since EPOCH; naive dates are taken as UTC."""
     ts = pd.Timestamp(t)
     ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
     return (ts - EPOCH) / pd.Timedelta(days=1)
 
 
 def read_points(conn):
-    """Lee de Postgres lo mínimo para el índice: id, evento, lon, lat, x, y, t."""
+    """Read from Postgres the minimum the index needs: id, event, lon, lat, x, y, t."""
     buf = io.StringIO()
     sql = ("COPY (SELECT event_id, lon, lat, x_km, y_km, "
            f"extract(epoch FROM t_utc - timestamptz '{EPOCH.isoformat()}') / 86400 "
@@ -56,7 +56,7 @@ class SpaceTimeIndex:
         self.t = points["t"].to_numpy()
         self.xyz = np.c_[points["x"].to_numpy(), points["y"].to_numpy(), self.t * km_per_day]
         self.backend = self._pick(backend)
-        # hybrid: KD-tree para near/nearest (pocas respuestas) y GPU para cajas grandes.
+        # hybrid: KD-tree for near/nearest (few results) and GPU for large boxes.
         self.box_backend = "kdtree" if self.backend == "kdtree" else "cuda"
         self.point_backend = "cuda" if self.backend == "cuda" else "kdtree"
         if "cuda" in (self.box_backend, self.point_backend):
@@ -72,7 +72,7 @@ class SpaceTimeIndex:
         self.build_seconds = time.perf_counter() - t0
 
     def _warmup(self):
-        """Compila los kernels de CuPy una vez, para que la primera consulta no tarde."""
+        """Compile the CuPy kernels once so the first query is not slow."""
         g = self.g
         m = (g["lon"] >= 0) & (g["lat"] >= 0) & (g["t"] >= 0) & (g["t"] < 1)
         g["event"][m].get()
@@ -107,7 +107,7 @@ class SpaceTimeIndex:
                 "load_seconds": round(getattr(self, "load_seconds", 0.0), 3),
                 "build_seconds": round(self.build_seconds, 3)}
 
-    # ------------------------------------------------------------------ consultas
+    # ------------------------------------------------------------------ queries
     @staticmethod
     def _count(event_ids):
         ids, n = np.unique(event_ids, return_counts=True)
@@ -120,10 +120,10 @@ class SpaceTimeIndex:
             m = ((g["lon"] >= lon_min) & (g["lon"] <= lon_max) & (g["lat"] >= lat_min)
                  & (g["lat"] <= lat_max) & (g["t"] >= d0) & (g["t"] < d1))
             return self._count(cp.asnumpy(g["event"][m]))
-        # La caja lon/lat se lleva a una caja en km que la contiene; el KD-tree devuelve los
-        # candidatos de un cubo (norma infinito) y luego se filtra exacto.
-        # En LAEA los bordes de la caja son curvos: se muestrea todo el contorno y se deja
-        # un margen de 1 km para no perder puntos cerca del borde.
+        # The lon/lat box is turned into a km box that contains it; the KD-tree returns the
+        # candidates inside a cube (infinity norm) and they are then filtered exactly.
+        # In LAEA the box edges are curved: the whole outline is sampled and a 1 km margin
+        # is added so points near the edge are not lost.
         s = np.linspace(0, 1, 65)
         lons = np.r_[lon_min + s * (lon_max - lon_min), lon_min + s * (lon_max - lon_min),
                      np.full(65, lon_min), np.full(65, lon_max)]
@@ -139,8 +139,8 @@ class SpaceTimeIndex:
         return self._count(self.event[cand[m]])
 
     def _cube(self, lo, hi):
-        """Candidatos dentro de un rectángulo 3D: se cubre con una rejilla de cubos (bolas en
-        norma infinito) de lado parecido, máximo 8 por eje, y se consulta todo de una vez."""
+        """Candidates inside a 3D rectangle: it is covered with a grid of cubes (infinity-norm
+        balls) of similar side, at most 8 per axis, and all are queried at once."""
         ext = hi - lo
         side = max(ext.min(), ext.max() / 8, 1e-6)
         steps = np.maximum(np.ceil(ext / side).astype(int), 1)
@@ -167,7 +167,7 @@ class SpaceTimeIndex:
         return self._count(self.event[cand[m]])
 
     def nearest(self, lat, lon, t, k=10):
-        """Los k eventos más cercanos a (lugar, instante), en km equivalentes."""
+        """The k events nearest to (place, instant), in equivalent km."""
         x, y = laea_km(np.array([lat]), np.array([lon]))
         q = np.array([x[0], y[0], to_days(t) * self.km_per_day])
         if self.point_backend == "cuda":
@@ -187,7 +187,7 @@ class SpaceTimeIndex:
 
 
 def benchmark(conn, repeats=20):
-    """Compara construcción y consultas en CPU y GPU con los datos de Postgres."""
+    """Compare build and query times on CPU and GPU with the Postgres data."""
     pts = read_points(conn)
     rng = np.random.default_rng(0)
     out = []
@@ -199,8 +199,9 @@ def benchmark(conn, repeats=20):
             continue
         row = {"backend": idx.backend, "build_s": round(idx.build_seconds, 3)}
         for name, fn in {
-            "box_region_mes": lambda: idx.box(-75.5, -10, -73.5, -8, "2024-09-01", "2024-10-01"),
-            "box_peru_anio": lambda: idx.box(-81.4, -18.4, -68.6, 0, "2020-01-01", "2021-01-01"),
+            "box_region_month": lambda: idx.box(-75.5, -10, -73.5, -8, "2024-09-01",
+                                                "2024-10-01"),
+            "box_peru_year": lambda: idx.box(-81.4, -18.4, -68.6, 0, "2020-01-01", "2021-01-01"),
             "near_10km_30d": lambda: idx.near(-8.8, -74.8, 10, "2019-08-15", "2019-09-15"),
             "nearest_k10": lambda: idx.nearest(*rng.uniform([-12, -76], [-6, -70]),
                                                "2019-09-01", 10),

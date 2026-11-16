@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Prepara la base y lanza la API.
+# Prepares the database and starts the API.
 #
-# 1. Espera a que Postgres responda en DATABASE_URL.
-# 2. Si la base todavía no tiene la tabla `events`, baja fires.dump (Google Drive por defecto),
-#    verifica su sha256 y lo restaura con pg_restore.
-# 3. Arranca la API con uvicorn.
+# 1. Waits until Postgres answers at DATABASE_URL.
+# 2. If the database has not been restored yet, downloads fires.dump (Google Drive by default),
+#    checks its sha256 and restores it with pg_restore.
+# 3. Starts the API with uvicorn.
 #
-# Sirve dentro del contenedor (Railway, Docker) y en cualquier Linux con Postgres:
+# Works inside the container (Railway, Docker) and on any Linux machine with Postgres:
 #   DATABASE_URL=postgresql:///fires PYTHON=.venv/bin/python bash deploy/bootstrap.sh
 set -euo pipefail
 
@@ -21,40 +21,40 @@ PORT="${PORT:-8000}"
 log() { echo "[bootstrap] $*"; }
 
 if [ -n "${RAILWAY_ENVIRONMENT:-}" ] && [ "$DATABASE_URL" = "postgresql:///fires" ]; then
-  log "Falta la variable DATABASE_URL: en Railway ponla como \${{Postgres.DATABASE_URL}}."
+  log "DATABASE_URL is missing or empty: on Railway set it to \${{Postgres.DATABASE_URL}}."
   exit 1
 fi
 
-log "Esperando a Postgres…"
+log "Waiting for Postgres…"
 for i in $(seq 1 60); do
   if psql "$DATABASE_URL" -Atqc "select 1" >/dev/null 2>&1; then break; fi
-  if [ "$i" -eq 60 ]; then log "Postgres no responde en DATABASE_URL"; exit 1; fi
+  if [ "$i" -eq 60 ]; then log "Postgres does not answer at DATABASE_URL"; exit 1; fi
   sleep 2
 done
 
-# bootstrap_ok se crea solo cuando pg_restore terminó bien. Si hay tablas pero no esa marca, la
-# restauración anterior quedó a medias (p. ej. disco lleno): se borra y se empieza de cero.
+# bootstrap_ok is created only after pg_restore finished cleanly. Tables without that marker
+# mean the previous restore stopped halfway (e.g. disk full): they are dropped and it starts over.
 if [ "$(psql "$DATABASE_URL" -Atqc "select to_regclass('public.bootstrap_ok') is not null")" = "t" ]; then
-  log "La base ya tiene datos: no se descarga nada."
+  log "The database already has the data: nothing to download."
 else
   if [ "$(psql "$DATABASE_URL" -Atqc "select count(*) from pg_tables where schemaname = 'public'")" != "0" ]; then
-    log "Restauración anterior incompleta: se borran las tablas y se restaura de nuevo."
+    log "Previous restore was incomplete: dropping the tables and restoring again."
     psql "$DATABASE_URL" -qc "drop schema public cascade; create schema public;"
   fi
   if [ ! -s "$DUMP_PATH" ] || ! echo "$DUMP_SHA256  $DUMP_PATH" | sha256sum -c --status; then
-    log "Descargando fires.dump (132 MB)…"
+    log "Downloading fires.dump (132 MB)…"
     curl -fL --retry 3 -o "$DUMP_PATH" "$DUMP_URL"
   fi
   if ! echo "$DUMP_SHA256  $DUMP_PATH" | sha256sum -c --status; then
-    log "El sha256 del dump no coincide: descarga incompleta o enlace equivocado."
+    log "The dump sha256 does not match: incomplete download or wrong link."
     exit 1
   fi
-  log "Restaurando la base (unos 2 minutos)…"
+  log "Restoring the database (about 2 minutes)…"
   pg_restore --no-owner --no-privileges --exit-on-error -d "$DATABASE_URL" "$DUMP_PATH"
   psql "$DATABASE_URL" -qc "create table bootstrap_ok as select now() as restored_at"
-  log "Base lista: $(psql "$DATABASE_URL" -Atqc "select count(*) from events") eventos."
+  log "Database ready: $(psql "$DATABASE_URL" -Atqc "select count(*) from events") events."
   [ "${KEEP_DUMP:-0}" = "1" ] || rm -f "$DUMP_PATH"
 fi
 
-log "Lanzando la API en http://$HOST:$PORT (docs en /docs)…"
+log "Starting the API at http://$HOST:$PORT (docs at /docs)…"
 exec "$PYTHON" -m uvicorn app.main:app --host "$HOST" --port "$PORT"
